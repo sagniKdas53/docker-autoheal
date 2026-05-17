@@ -16,4 +16,4 @@ function cleanup()
 }
 trap cleanup EXIT
 "${COMPOSE[@]}" -f docker-compose.yml up --build -d
-"${COMPOSE[@]}" -f docker-compose.autoheal.yml up --build --exit-code-from watch-autoheal watch-autoheal
+"${COMPOSE[@]}" -f docker-compose.yml -f docker-compose.autoheal.yml up --build --exit-code-from watch-autoheal watch-autoheal

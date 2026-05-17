@@ -66,6 +66,11 @@ services:
     environment:
       AUTOHEAL_CONTAINER_LABEL: "${AUTOHEAL_CONTAINER_LABEL:-all}"
       AUTOHEAL_INTERVAL: "2"
+      WEBHOOK_URL: "http://webhook-sink:8080/notify"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
-    network_mode: none
+
+  webhook-sink:
+    build:
+      context: webhook-sink
+    restart: "no"

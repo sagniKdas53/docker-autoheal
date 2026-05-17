@@ -11,6 +11,13 @@ unexpected_restart_services=(
   "shouldnt-restart-no-label"
 )
 
+expected_webhook_targets=(
+  "${COMPOSE_PROJECT_NAME}-should-restart-default-timeout-1"
+  "${COMPOSE_PROJECT_NAME}-should-restart-custom-timeout-1"
+)
+
+webhook_sink_container="${COMPOSE_PROJECT_NAME}-webhook-sink-1"
+
 restart_event_count_for_service() {
   local now
   local since
@@ -38,10 +45,30 @@ print_restart_event_counts() {
   done
 }
 
+webhook_logs() {
+  docker logs "$webhook_sink_container" 2>&1 || true
+}
+
+webhook_request_count() {
+  webhook_logs | awk 'END { print NR + 0 }'
+}
+
+webhook_contains_target() {
+  local target="$1"
+
+  webhook_logs | grep -Fq "$target"
+}
+
+print_webhook_logs() {
+  echo "webhook logs:"
+  webhook_logs
+}
+
 deadline=$((SECONDS + 60))
 
 while (( SECONDS < deadline )); do
   expected_restarts_met=true
+  expected_webhooks_met=true
 
   for service in "${expected_restart_services[@]}"; do
     count=$(restart_event_count_for_service "$service")
@@ -49,6 +76,15 @@ while (( SECONDS < deadline )); do
 
     if (( count < 1 )); then
       expected_restarts_met=false
+    fi
+  done
+
+  request_count=$(webhook_request_count)
+  echo "webhook request count: $request_count"
+
+  for target in "${expected_webhook_targets[@]}"; do
+    if ! webhook_contains_target "$target"; then
+      expected_webhooks_met=false
     fi
   done
 
@@ -62,14 +98,15 @@ while (( SECONDS < deadline )); do
     fi
   done
 
-  if [[ "$expected_restarts_met" == true ]]; then
-    echo "OK: Expected unhealthy containers were restarted"
+  if [[ "$expected_restarts_met" == true && "$expected_webhooks_met" == true ]]; then
+    echo "OK: Expected unhealthy containers were restarted and webhook notifications were delivered"
     exit 0
   fi
 
   sleep 2
 done
 
-echo "ERR: Timed out waiting for unhealthy containers to restart" >&2
+echo "ERR: Timed out waiting for unhealthy containers to restart or emit webhook notifications" >&2
 print_restart_event_counts
+print_webhook_logs
 exit 1
