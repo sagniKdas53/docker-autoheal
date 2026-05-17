@@ -44,6 +44,17 @@ docker_curl() {
   "$@"
 }
 
+notify_json_endpoint() {
+  local url="$1"
+  local payload="$2"
+
+  curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
+    -X POST \
+    -H "Content-type: application/json" \
+    -d "$payload" \
+    "$url" >/dev/null 2>&1 &
+}
+
 # shellcheck disable=2039
 get_container_info() {
   local label_filter
@@ -76,18 +87,16 @@ restart_container() {
 }
 
 notify_webhook() {
-  local text="$@"
+  local text="$*"
 
   if [ -n "$WEBHOOK_URL" ]
   then
-    # execute webhook requests as background process to prevent healer from blocking
-    curl -s -X POST -H "Content-type: application/json" -d "$(generate_webhook_payload $text)"  "$WEBHOOK_URL"
+    notify_json_endpoint "$WEBHOOK_URL" "$(generate_webhook_payload "$text")"
   fi
 
   if [ -n "$APPRISE_URL" ]
   then
-    # execute webhook requests as background process to prevent healer from blocking
-    curl -s -X POST -H "Content-type: application/json" -d "$(generate_apprise_payload $text)"  "$APPRISE_URL"
+    notify_json_endpoint "$APPRISE_URL" "$(generate_apprise_payload "$text")"
   fi
 }
 
@@ -164,11 +173,11 @@ then
         if ! restart_container "$CONTAINER_ID" "$TIMEOUT"
         then
           echo "$DATE Restarting container $CONTAINER_SHORT_ID failed" >&2
-          notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Failed to restart the container!" &
+          notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Failed to restart the container!"
         else
-          notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Successfully restarted the container!" &
+          notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Successfully restarted the container!"
         fi
-        notify_post_restart_script "$CONTAINER_NAME" "$CONTAINER_SHORT_ID" "$CONTAINER_STATE" "$TIMEOUT" &
+        notify_post_restart_script "$CONTAINER_NAME" "$CONTAINER_SHORT_ID" "$CONTAINER_STATE" "$TIMEOUT"
       fi
     done
     sleep "$AUTOHEAL_INTERVAL" &

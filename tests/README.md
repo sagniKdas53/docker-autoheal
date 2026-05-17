@@ -4,7 +4,8 @@ Docker Compose is used to build and deploy test environment.
 
 test.sh waits on watch-autoheal exit code.
 
-Currently setup to a very basic exit 1 on invalid restart and exit 0 on valid restart. 
+The test stack starts unhealthy containers, then polls Docker restart event counts.
+The run passes once each watched unhealthy container has at least one restart event and the control containers remain at zero.
 
 ## Run tests
 ```

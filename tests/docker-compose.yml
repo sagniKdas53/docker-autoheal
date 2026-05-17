@@ -1,9 +1,7 @@
-version: '3.7'
-
 services:
 
-  should-keep-restarting:
-    # this container should be restarted by autoheal because its unhealthy and has the autoheal label
+  should-restart-default-timeout:
+    # this container should be restarted by autoheal because it is unhealthy and has the autoheal label
     image: alpine
     network_mode: none
     restart: "no"
@@ -11,14 +9,30 @@ services:
       - "$AUTOHEAL_CONTAINER_LABEL=true"
     healthcheck:
       test: exit 1
-      interval: 3s
+      interval: 1s
       timeout: 1s
-      retries: 3
-      start_period: 5s
+      retries: 1
+      start_period: 1s
+    command: tail -f /dev/null
+
+  should-restart-custom-timeout:
+    # this container should also be restarted, while exercising the per-container timeout label
+    image: alpine
+    network_mode: none
+    restart: "no"
+    labels:
+      - "$AUTOHEAL_CONTAINER_LABEL=true"
+      - "autoheal.stop.timeout=1"
+    healthcheck:
+      test: exit 1
+      interval: 1s
+      timeout: 1s
+      retries: 1
+      start_period: 1s
     command: tail -f /dev/null
 
   shouldnt-restart-healthy:
-    # this container shouldn't be restarted by autoheal because its healthy
+    # this container should not be restarted because it is healthy
     image: alpine
     network_mode: none
     restart: "no"
@@ -26,23 +40,23 @@ services:
       - "$AUTOHEAL_CONTAINER_LABEL=true"
     healthcheck:
       test: exit 0
-      interval: 2s
+      interval: 1s
       timeout: 1s
       retries: 1
       start_period: 1s
     command: tail -f /dev/null
 
   shouldnt-restart-no-label:
-    # this container shouldn't be restarted by autoheal because its missing the autoheal label
+    # this container should not be restarted because it is unhealthy but missing the autoheal label
     image: alpine
     network_mode: none
     restart: "no"
     healthcheck:
       test: exit 1
-      interval: 3s
+      interval: 1s
       timeout: 1s
       retries: 1
-      start_period: 5s
+      start_period: 1s
     command: tail -f /dev/null
 
   autoheal:
@@ -51,7 +65,7 @@ services:
     restart: unless-stopped
     environment:
       AUTOHEAL_CONTAINER_LABEL: "${AUTOHEAL_CONTAINER_LABEL:-all}"
-      AUTOHEAL_INTERVAL: "10"
+      AUTOHEAL_INTERVAL: "2"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
     network_mode: none

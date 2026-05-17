@@ -1,6 +1,6 @@
-FROM alpine:latest
+FROM alpine:3.18
 
-RUN apk --update add bash docker
+RUN apk add --no-cache bash docker-cli
 
 
 WORKDIR /app
