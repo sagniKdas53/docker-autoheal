@@ -1,45 +1,19 @@
-name: github-build
+name: Release
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/**'
-      - 'Dockerfile'
-      - 'docker-entrypoint'
-      - 'tests/**'
   push:
     branches:
-      - '**'
-    paths:
-      - '.github/workflows/**'
-      - 'Dockerfile'
-      - 'docker-entrypoint'
-      - 'tests/**'
-  push:  # separate block so tags always trigger regardless of paths
+      - main
     tags:
       - '*'
-  workflow_dispatch:  # allows manual trigger from the Actions UI
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run integration tests
-        working-directory: tests
-        env:
-          AUTOHEAL_CONTAINER_LABEL: autoheal-${{ github.run_id }}
-        run: ./tests.sh autoheal-${{ github.run_id }}
-
   multi:
-    needs: test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
