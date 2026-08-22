@@ -13,7 +13,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run integration tests
+        working-directory: tests
+        env:
+          AUTOHEAL_CONTAINER_LABEL: autoheal-${{ github.run_id }}
+        run: ./tests.sh autoheal-${{ github.run_id }}
+
   multi:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,7 +55,16 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
           tags: |
             type=ref,event=tag
+            type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Verify tags were produced
+        run: |
+          if [ -z "${{ steps.meta.outputs.tags }}" ]
+          then
+            echo "No image tags were produced for ref ${{ github.ref }}; refusing to push" >&2
+            exit 1
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v6

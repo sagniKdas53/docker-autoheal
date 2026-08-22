@@ -17,9 +17,13 @@ cd tests
 ```
 cd tests
 export "AUTOHEAL_CONTAINER_LABEL=autoheal-123456"
-./tests.sh "MY_UNIQUE_BUILD_NUMBER_123456"
+./tests.sh "autoheal-build-123456"
 ```
 
 This enables the tests to only restart containers within the test spec by using
-unique docker-compose project names and autoheal labels (as long as you replace
-123456 by a unique number)
+unique docker compose project names and autoheal labels (as long as you replace
+123456 by a unique number).
+
+The project name is passed straight to `docker compose`, which only accepts
+lowercase alphanumeric characters, hyphens and underscores, and requires the
+name to start with a letter or number.
