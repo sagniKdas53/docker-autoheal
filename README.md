@@ -5,12 +5,19 @@ This functionality was proposed to be included with the addition of `HEALTHCHECK
 This container is a stand-in till there is native support for `--exit-on-unhealthy` https://github.com/docker/docker/pull/22719.
 
 ## Supported tags and Dockerfile links
-- [`latest` (*Dockerfile*)](https://github.com/willfarrell/docker-autoheal/blob/main/Dockerfile) - Built daily
-- [`1.1.0` (*Dockerfile*)](https://github.com/willfarrell/docker-autoheal/blob/1.1.0/Dockerfile)
-- [`v0.7.0` (*Dockerfile*)](https://github.com/willfarrell/docker-autoheal/blob/v0.7.0/Dockerfile)
 
+Images are published to the GitHub Container Registry as
+`ghcr.io/sagnikdas53/docker-autoheal`.
 
-![](https://img.shields.io/docker/pulls/willfarrell/autoheal "Total docker pulls") [![](https://images.microbadger.com/badges/image/willfarrell/autoheal.svg)](http://microbadger.com/images/willfarrell/autoheal "Docker layer breakdown")
+- [`latest` (*Dockerfile*)](https://github.com/sagniKdas53/docker-autoheal/blob/main/Dockerfile) - rebuilt on every push to `main`, once the integration suite passes
+- Each git tag is published under the same name, e.g. `ghcr.io/sagnikdas53/docker-autoheal:1.1.0`
+
+```bash
+docker pull ghcr.io/sagnikdas53/docker-autoheal:latest
+```
+
+> There is no scheduled rebuild, so a new image is produced only when this
+> repository changes. Push a commit or a tag to pick up base image updates.
 
 ## How to use
 
@@ -22,7 +29,7 @@ docker run -d \
     --restart=always \
     -e AUTOHEAL_CONTAINER_LABEL=all \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    willfarrell/autoheal
+    ghcr.io/sagnikdas53/docker-autoheal
 ```
 #### TCP socket 
 ```bash
@@ -32,7 +39,7 @@ docker run -d \
     -e AUTOHEAL_CONTAINER_LABEL=all \
     -e DOCKER_SOCK=tcp://$HOST:$PORT \
     -v /path/to/certs/:/certs/:ro \
-    willfarrell/autoheal
+    ghcr.io/sagnikdas53/docker-autoheal
 ```
 #### TCP with mTLS (HTTPS)
 ```bash
@@ -47,7 +54,7 @@ docker run -d \
     -e DOCKER_SOCK=tcps://$HOST:2376 \
     -e DOCKER_TLS_VERIFY=1 \
     -v /path/to/certs/:/certs/:ro \
-    willfarrell/autoheal
+    ghcr.io/sagnikdas53/docker-autoheal
 ```
 The certificates and keys need these names and resides under /certs inside the container:
 * ca.pem
@@ -87,7 +94,7 @@ services:
       replicas: 1
     environment:
       AUTOHEAL_CONTAINER_LABEL: autoheal-app
-    image: willfarrell/autoheal:latest
+    image: ghcr.io/sagnikdas53/docker-autoheal:latest
     network_mode: none
     restart: always
     volumes:
@@ -108,7 +115,7 @@ services:
 |`AUTOHEAL_DEFAULT_STOP_TIMEOUT=10`    |Docker waits max 10 seconds (the Docker default) for a container to stop before killing during restarts (container overridable via label, see below)|
 |`AUTOHEAL_ONLY_MONITOR_RUNNING=false` |All containers monitored by default. Set this to true to only monitor running containers. This will result in Paused contaners being ignored.|
 |`DOCKER_SOCK=/var/run/docker.sock`    |Unix socket for curl requests to Docker API|
-|`CURL_TIMEOUT=30`                     |--max-time seconds for curl requests to Docker API|
+|`CURL_TIMEOUT=30`                     |--max-time seconds for curl requests to the Docker API and to webhooks. Must be a positive integer; `0` and other invalid values fall back to 30, since curl treats `--max-time 0` as no timeout at all|
 |`WEBHOOK_URL=""`                      |post message to the webhook if a container was restarted (or restart failed)|
 
 ## Testing (building locally)

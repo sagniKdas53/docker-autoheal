@@ -7,6 +7,20 @@ set -o pipefail
 DOCKER_SOCK=${DOCKER_SOCK:-/var/run/docker.sock}
 UNIX_SOCK=""
 CURL_TIMEOUT=${CURL_TIMEOUT:-30}
+# curl treats `--max-time 0` as "no timeout at all", so a value of 0 (or a
+# non-numeric one) would let notification workers hang forever. Fall back to the
+# default so the bound always holds.
+case "${CURL_TIMEOUT}" in
+  ''|*[!0-9]*) echo "CURL_TIMEOUT=${CURL_TIMEOUT} is not a positive integer, using 30" >&2
+               CURL_TIMEOUT=30
+               ;;
+  *)           if [ "${CURL_TIMEOUT}" -le 0 ]
+               then
+                 echo "CURL_TIMEOUT=${CURL_TIMEOUT} would disable the timeout, using 30" >&2
+                 CURL_TIMEOUT=30
+               fi
+               ;;
+esac
 WEBHOOK_URL=${WEBHOOK_URL:-""}
 WEBHOOK_JSON_KEY=${WEBHOOK_JSON_KEY:-"text"}
 APPRISE_URL=${APPRISE_URL:-""}
@@ -48,11 +62,23 @@ notify_json_endpoint() {
   local url="$1"
   local payload="$2"
 
-  curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
-    -X POST \
-    -H "Content-type: application/json" \
-    -d "$payload" \
-    "$url" >/dev/null 2>&1 &
+  # Delivery runs in the background so the healer never blocks on it, but the
+  # outcome is still logged: a silently dropped notification is indistinguishable
+  # from a delivered one otherwise.
+  (
+    if ! result=$(curl --max-time "${CURL_TIMEOUT}" --no-buffer -sS \
+      -o /dev/null -w '%{http_code}' \
+      -X POST \
+      -H "Content-type: application/json" \
+      -d "$payload" \
+      "$url" 2>&1)
+    then
+      echo "$(date +%d-%m-%Y" "%H:%M:%S) Notification to ${url} failed: ${result}" >&2
+    elif [ "$result" -lt 200 ] || [ "$result" -ge 300 ]
+    then
+      echo "$(date +%d-%m-%Y" "%H:%M:%S) Notification to ${url} returned HTTP ${result}" >&2
+    fi
+  ) &
 }
 
 # shellcheck disable=2039

@@ -4,9 +4,6 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-requests = []
-
-
 class Handler(BaseHTTPRequestHandler):
     def _write_json(self, status_code, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -16,22 +13,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
-        if self.path != "/requests":
-            self._write_json(404, {"error": "not found"})
-            return
-
-        self._write_json(200, requests)
-
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8")
-        requests.append({
-            "path": self.path,
-            "body": body,
-        })
-        print(body, flush=True)
-        self._write_json(200, {"stored": len(requests)})
+        # The harness reads these logs, so collapse the multi-line JSON payload
+        # into a single line: one log line per request.
+        print(" ".join(body.split()), flush=True)
+        self._write_json(200, {"received": True})
 
     def log_message(self, format, *args):
         return
