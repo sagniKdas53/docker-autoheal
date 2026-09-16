@@ -358,8 +358,6 @@ fetch_containers() {
   local fetcher="$2"
   local body
 
-  write_heartbeat
-
   # A transient API error used to take the whole daemon down through `set -e`;
   # now it is logged and the next sweep tries again.
   if ! body=$("$fetcher" 2>&1)
@@ -373,6 +371,12 @@ fetch_containers() {
     log_err "Unexpected Docker API response while looking for ${description}: $(printf '%s' "$body" | head -c 200)"
     return 1
   fi
+
+  # Only here, once the API has answered with something usable. The heartbeat
+  # attests to Docker access, so stamping it before the request -- or after a
+  # failure -- would keep the container reporting healthy while it heals
+  # nothing, which is the exact state the healthcheck exists to expose.
+  write_heartbeat
 
   printf '%s' "$body"
 }
@@ -540,7 +544,6 @@ then
       start_exited_containers
     fi
 
-    write_heartbeat
     interruptible_sleep "$AUTOHEAL_INTERVAL"
   done
 

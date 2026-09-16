@@ -169,10 +169,12 @@ to verify the configuration end to end.
 
 ## Container health
 
-The image's own `HEALTHCHECK` reads a heartbeat that the daemon stamps after
-every completed sweep. A loop that is wedged on an unreachable Docker API is
-reported as unhealthy, where the previous `pgrep` check only proved the process
-still existed.
+The image's own `HEALTHCHECK` reads a heartbeat that the daemon stamps each time
+the Docker API answers with a usable response, and again as it works through the
+containers in a sweep. So the container reports unhealthy when the Docker API is
+unreachable or keeps returning nonsense, and stays healthy through a slow sweep
+over many containers that each take their full stop timeout. The previous
+`pgrep` check only proved the process still existed.
 
 Startup failures are explicit too: a missing Docker socket, a socket the
 container cannot write to, or an unreachable API each produce a named error

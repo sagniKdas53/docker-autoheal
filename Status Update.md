@@ -29,9 +29,10 @@
 - `AUTOHEAL_ONLY_MONITOR_RUNNING` accepts the usual spellings (`True`, `yes`,
   `1`) rather than only the literal `false`, and is declared in the Dockerfile
   alongside the other settings.
-- The container `HEALTHCHECK` reads a heartbeat stamped after each sweep.
-  `pgrep -f autoheal` only proved the process existed, so a loop wedged on an
-  unreachable API still reported healthy.
+- The container `HEALTHCHECK` reads a heartbeat stamped when the Docker API
+  answers and as each container is processed. `pgrep -f autoheal` only proved
+  the process existed, so a loop that could not reach the API still reported
+  healthy.
 - Alpine moved from 3.18 (end-of-life May 2025) to 3.22.
 
 ## Added from upstream requests
