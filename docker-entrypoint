@@ -48,6 +48,15 @@ sanitize_int() {
                  ;;
   esac
 
+  # Strip leading zeros. `test` reads them as decimal so they pass the range
+  # check below, but shell arithmetic reads them as octal: $((08 * 3)) is a hard
+  # error ("Illegal number"), and $((010)) is 8. Keep at least one digit so
+  # "000" normalizes to "0" rather than "".
+  while [ "${#value}" -gt 1 ] && [ "${value#0}" != "$value" ]
+  do
+    value=${value#0}
+  done
+
   if [ "$value" -lt "$min" ]
   then
     echo "${name}=${value} is below the minimum of ${min}, using ${default}" >&2
@@ -208,9 +217,19 @@ notify_json_endpoint() {
       # curl's stderr and the -w status code both land in $result; collapse them
       # so one failed notification is one greppable log line.
       log_err "Notification to ${url} failed: $(printf '%s' "$result" | tr '\n' ' ')"
-    elif [ "$result" -lt 200 ] || [ "$result" -ge 300 ]
-    then
-      log_err "Notification to ${url} returned HTTP ${result}"
+    else
+      # curl exited 0, so $result should be the status code from -w. Check before
+      # comparing anyway: anything else (a warning on stderr, an empty body) would
+      # otherwise turn into a bare "integer expression expected" from `[`.
+      case "$result" in
+        ''|*[!0-9]*) log_err "Notification to ${url} returned an unreadable status: $(printf '%s' "$result" | tr '\n' ' ')"
+                     ;;
+        *)           if [ "$result" -lt 200 ] || [ "$result" -ge 300 ]
+                     then
+                       log_err "Notification to ${url} returned HTTP ${result}"
+                     fi
+                     ;;
+      esac
     fi
   ) &
 }
@@ -333,13 +352,17 @@ run_healthcheck() {
 # The opt-out comparison is case-insensitive: `autoheal=false` is what the
 # README and every compose example use, but the check only ever excluded the
 # capitalised "False", so the documented opt-out silently did nothing.
+#
+# It only checks the `autoheal` label, never AUTOHEAL_CONTAINER_LABEL: in "all"
+# mode that setting is a sentinel rather than a label name, and with a real
+# label name Docker's own `label=NAME=true` filter has already dropped anything
+# set to false.
 container_fields() {
   local status_field="$1"
 
   cat <<JQ
 .[]
-| select((((.Labels["autoheal"] // "") | ascii_downcase) != "false")
-     and (((.Labels[\$label]     // "") | ascii_downcase) != "false"))
+| select(((.Labels["autoheal"] // "") | ascii_downcase) != "false")
 | .Id, (.Names[0] // "null"), ${status_field}, (.Labels["autoheal.stop.timeout"] // \$default)
 JQ
 }
@@ -347,7 +370,6 @@ JQ
 # read_containers JSON JQ_PROGRAM -> four lines per container
 read_containers() {
   printf '%s' "$1" | jq -r \
-    --arg label "$AUTOHEAL_CONTAINER_LABEL" \
     --arg default "$AUTOHEAL_DEFAULT_STOP_TIMEOUT" \
     "$2"
 }
