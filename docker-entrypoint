@@ -1,62 +1,194 @@
 #!/usr/bin/env sh
+#
+# The image ships busybox ash, which supports `local`, string indexing, `set -o
+# pipefail` and bare signal names. ShellCheck only knows they are absent from
+# strict POSIX sh, so those four checks are silenced for the whole file.
+# shellcheck disable=SC3040,SC3043,SC3048,SC3057
 
 set -e
-# shellcheck disable=2039
 set -o pipefail
+
+###############################################################################
+# Helpers
+###############################################################################
+
+log() {
+  echo "$(date +%d-%m-%Y" "%H:%M:%S) $*"
+}
+
+log_err() {
+  echo "$(date +%d-%m-%Y" "%H:%M:%S) $*" >&2
+}
+
+# Accept the spellings people actually write in compose files rather than only
+# the lower-case literal `true`.
+is_true() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    true|yes|y|1|on) return 0 ;;
+    *)               return 1 ;;
+  esac
+}
+
+# sanitize_int NAME VALUE DEFAULT MIN
+#
+# Echoes VALUE when it is an integer >= MIN, otherwise complains and echoes
+# DEFAULT. Every numeric setting goes through this: an unparsable value used to
+# abort the daemon on the first `sleep`/`[ -gt ]` with a shell error rather than
+# an explanation.
+sanitize_int() {
+  local name="$1"
+  local value="$2"
+  local default="$3"
+  local min="$4"
+
+  case "$value" in
+    ''|*[!0-9]*) echo "${name}=${value} is not a non-negative integer, using ${default}" >&2
+                 printf '%s' "$default"
+                 return 0
+                 ;;
+  esac
+
+  if [ "$value" -lt "$min" ]
+  then
+    echo "${name}=${value} is below the minimum of ${min}, using ${default}" >&2
+    printf '%s' "$default"
+    return 0
+  fi
+
+  printf '%s' "$value"
+}
+
+###############################################################################
+# Configuration
+###############################################################################
 
 DOCKER_SOCK=${DOCKER_SOCK:-/var/run/docker.sock}
 UNIX_SOCK=""
-CURL_TIMEOUT=${CURL_TIMEOUT:-30}
+
 # curl treats `--max-time 0` as "no timeout at all", so a value of 0 (or a
-# non-numeric one) would let notification workers hang forever. Fall back to the
-# default so the bound always holds.
-case "${CURL_TIMEOUT}" in
-  ''|*[!0-9]*) echo "CURL_TIMEOUT=${CURL_TIMEOUT} is not a positive integer, using 30" >&2
-               CURL_TIMEOUT=30
-               ;;
-  *)           if [ "${CURL_TIMEOUT}" -le 0 ]
-               then
-                 echo "CURL_TIMEOUT=${CURL_TIMEOUT} would disable the timeout, using 30" >&2
-                 CURL_TIMEOUT=30
-               fi
-               ;;
-esac
+# non-numeric one) would let notification workers hang forever.
+CURL_TIMEOUT=$(sanitize_int CURL_TIMEOUT "${CURL_TIMEOUT:-30}" 30 1)
+
 WEBHOOK_URL=${WEBHOOK_URL:-""}
-WEBHOOK_JSON_KEY=${WEBHOOK_JSON_KEY:-"text"}
+# Matches the Dockerfile's ENV default. The two used to disagree ("text" here,
+# "content" there), which made the script misleading to read.
+WEBHOOK_JSON_KEY=${WEBHOOK_JSON_KEY:-"content"}
 APPRISE_URL=${APPRISE_URL:-""}
+POST_RESTART_SCRIPT=${POST_RESTART_SCRIPT:-""}
+
+AUTOHEAL_CONTAINER_LABEL=${AUTOHEAL_CONTAINER_LABEL:-autoheal}
+AUTOHEAL_START_PERIOD=$(sanitize_int AUTOHEAL_START_PERIOD "${AUTOHEAL_START_PERIOD:-0}" 0 0)
+AUTOHEAL_INTERVAL=$(sanitize_int AUTOHEAL_INTERVAL "${AUTOHEAL_INTERVAL:-5}" 5 1)
+AUTOHEAL_DEFAULT_STOP_TIMEOUT=$(sanitize_int AUTOHEAL_DEFAULT_STOP_TIMEOUT "${AUTOHEAL_DEFAULT_STOP_TIMEOUT:-10}" 10 0)
+AUTOHEAL_ONLY_MONITOR_RUNNING=${AUTOHEAL_ONLY_MONITOR_RUNNING:-false}
+AUTOHEAL_START_EXITED_CONTAINERS=${AUTOHEAL_START_EXITED_CONTAINERS:-false}
+AUTOHEAL_NOTIFY_ON_START=${AUTOHEAL_NOTIFY_ON_START:-false}
+AUTOHEAL_INCLUDE_HEALTH_OUTPUT=${AUTOHEAL_INCLUDE_HEALTH_OUTPUT:-false}
+AUTOHEAL_HEALTH_OUTPUT_LIMIT=$(sanitize_int AUTOHEAL_HEALTH_OUTPUT_LIMIT "${AUTOHEAL_HEALTH_OUTPUT_LIMIT:-500}" 500 1)
+HEARTBEAT_FILE=${AUTOHEAL_HEARTBEAT_FILE:-/tmp/autoheal.heartbeat}
+
+# Starting every exited container on the host is almost never what someone
+# means, so the feature requires an explicit label to scope it.
+if is_true "$AUTOHEAL_START_EXITED_CONTAINERS" && [ "$AUTOHEAL_CONTAINER_LABEL" = "all" ]
+then
+  echo "AUTOHEAL_START_EXITED_CONTAINERS is not supported with AUTOHEAL_CONTAINER_LABEL=all, disabling it: set AUTOHEAL_CONTAINER_LABEL to a real label so only opted-in containers are started" >&2
+  AUTOHEAL_START_EXITED_CONTAINERS=false
+fi
 
 # only use unix domain socket if no TCP endpoint is defined
 case "${DOCKER_SOCK}" in
-  "tcp://"*) HTTP_ENDPOINT="$(echo "${DOCKER_SOCK}" | sed 's#tcp://#http://#')"
-             ;;
+  "tcp://"*)  HTTP_ENDPOINT="$(echo "${DOCKER_SOCK}" | sed 's#tcp://#http://#')"
+              ;;
   "tcps://"*) HTTP_ENDPOINT="$(echo "${DOCKER_SOCK}" | sed 's#tcps://#https://#')"
-             CA="--cacert /certs/ca.pem"
-             CLIENT_KEY="--key /certs/client-key.pem"
-             CLIENT_CERT="--cert /certs/client-cert.pem"
-             ;;
-  *)         HTTP_ENDPOINT="http://localhost"
-             UNIX_SOCK="--unix-socket ${DOCKER_SOCK}"
-             ;;
+              CA="--cacert /certs/ca.pem"
+              CLIENT_KEY="--key /certs/client-key.pem"
+              CLIENT_CERT="--cert /certs/client-cert.pem"
+              ;;
+  *)          HTTP_ENDPOINT="http://localhost"
+              UNIX_SOCK="--unix-socket ${DOCKER_SOCK}"
+              ;;
 esac
 
-AUTOHEAL_CONTAINER_LABEL=${AUTOHEAL_CONTAINER_LABEL:-autoheal}
-AUTOHEAL_START_PERIOD=${AUTOHEAL_START_PERIOD:-0}
-AUTOHEAL_INTERVAL=${AUTOHEAL_INTERVAL:-5}
-AUTOHEAL_DEFAULT_STOP_TIMEOUT=${AUTOHEAL_DEFAULT_STOP_TIMEOUT:-10}
-AUTOHEAL_ONLY_MONITOR_RUNNING=${AUTOHEAL_ONLY_MONITOR_RUNNING:-false}
-
-echo AUTOHEAL_CONTAINER_LABEL=${AUTOHEAL_CONTAINER_LABEL}
-echo AUTOHEAL_START_PERIOD=${AUTOHEAL_START_PERIOD}
-echo AUTOHEAL_INTERVAL=${AUTOHEAL_INTERVAL}
-echo AUTOHEAL_DEFAULT_STOP_TIMEOUT=${AUTOHEAL_DEFAULT_STOP_TIMEOUT}
-echo AUTOHEAL_ONLY_MONITOR_RUNNING=${AUTOHEAL_ONLY_MONITOR_RUNNING}
+###############################################################################
+# Docker API
+###############################################################################
 
 docker_curl() {
-  curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
+  # The credential flags are deliberately unquoted: each expands to zero or
+  # several curl arguments.
+  # shellcheck disable=SC2086
+  curl --max-time "${CURL_TIMEOUT}" --no-buffer -sS -f \
   ${CA} ${CLIENT_KEY} ${CLIENT_CERT} \
   ${UNIX_SOCK} \
   "$@"
 }
+
+# get_container_info EXTRA_FILTER [QUERY_SUFFIX]
+get_container_info() {
+  local extra_filter="$1"
+  local query_suffix="${2:-}"
+  local label_filter
+  local url
+
+  # Set container selector
+  if [ "$AUTOHEAL_CONTAINER_LABEL" = "all" ]
+  then
+    label_filter=""
+  else
+    label_filter=",\"label\":\[\"${AUTOHEAL_CONTAINER_LABEL}=true\"\]"
+  fi
+
+  url="${HTTP_ENDPOINT}/containers/json?filters=\{${extra_filter}${label_filter}\}${query_suffix}"
+  docker_curl "$url"
+}
+
+get_unhealthy_container_info() {
+  local running_filter=""
+
+  if is_true "$AUTOHEAL_ONLY_MONITOR_RUNNING"
+  then
+    running_filter=",\"status\":\[\"running\"\]"
+  fi
+
+  get_container_info "\"health\":\[\"unhealthy\"\]${running_filter}"
+}
+
+get_exited_container_info() {
+  # /containers/json hides non-running containers unless `all` is set, so the
+  # status filter alone would never match anything.
+  get_container_info "\"status\":\[\"exited\"\]" "&all=true"
+}
+
+restart_container() {
+  local container_id="$1"
+  local timeout="$2"
+
+  docker_curl -X POST "${HTTP_ENDPOINT}/containers/${container_id}/restart?t=${timeout}" >/dev/null
+}
+
+start_container() {
+  local container_id="$1"
+
+  docker_curl -X POST "${HTTP_ENDPOINT}/containers/${container_id}/start" >/dev/null
+}
+
+# The health log is reset by the restart, so this has to be read first.
+last_health_output() {
+  local container_id="$1"
+  local output
+
+  if ! output=$(docker_curl "${HTTP_ENDPOINT}/containers/${container_id}/json" 2>/dev/null \
+    | jq -r '(.State.Health.Log // []) | last | .Output // ""' 2>/dev/null)
+  then
+    return 0
+  fi
+
+  printf '%s' "$output" | tr '\n\r\t' '   ' | cut -c "1-${AUTOHEAL_HEALTH_OUTPUT_LIMIT}"
+}
+
+###############################################################################
+# Notifications
+###############################################################################
 
 notify_json_endpoint() {
   local url="$1"
@@ -73,43 +205,23 @@ notify_json_endpoint() {
       -d "$payload" \
       "$url" 2>&1)
     then
-      echo "$(date +%d-%m-%Y" "%H:%M:%S) Notification to ${url} failed: ${result}" >&2
+      log_err "Notification to ${url} failed: ${result}"
     elif [ "$result" -lt 200 ] || [ "$result" -ge 300 ]
     then
-      echo "$(date +%d-%m-%Y" "%H:%M:%S) Notification to ${url} returned HTTP ${result}" >&2
+      log_err "Notification to ${url} returned HTTP ${result}"
     fi
   ) &
 }
 
-# shellcheck disable=2039
-get_container_info() {
-  local label_filter
-  local running_filter
-  local url
-
-  # Set container selector
-  if [ "$AUTOHEAL_CONTAINER_LABEL" = "all" ]
-  then
-    label_filter=""
-  else
-    label_filter=",\"label\":\[\"${AUTOHEAL_CONTAINER_LABEL}=true\"\]"
-  fi
-  if [ "$AUTOHEAL_ONLY_MONITOR_RUNNING" = false ]
-  then
-    running_filter=""
-  else
-    running_filter=",\"status\":\[\"running\"\]"
-  fi
-  url="${HTTP_ENDPOINT}/containers/json?filters=\{\"health\":\[\"unhealthy\"\]${label_filter}${running_filter}\}"
-  docker_curl "$url"
+# jq builds the bodies so that container names, healthcheck output and custom
+# JSON keys are escaped instead of being pasted into a template, which used to
+# produce invalid JSON for anything containing a quote, a backslash or a newline.
+generate_webhook_payload() {
+  jq -nc --arg key "$WEBHOOK_JSON_KEY" --arg text "$1" '{($key): $text}'
 }
 
-# shellcheck disable=2039
-restart_container() {
-  local container_id="$1"
-  local timeout="$2"
-
-  docker_curl -f -X POST "${HTTP_ENDPOINT}/containers/${container_id}/restart?t=${timeout}"
+generate_apprise_payload() {
+  jq -nc --arg text "$1" '{title: "Autoheal", body: $text}'
 }
 
 notify_webhook() {
@@ -129,85 +241,292 @@ notify_webhook() {
 notify_post_restart_script() {
   if [ -n "$POST_RESTART_SCRIPT" ]
   then
-    # execute post restart script as background process to prevent healer from blocking
+    # Unquoted on purpose so POST_RESTART_SCRIPT may carry its own arguments.
+    # shellcheck disable=SC2086
     $POST_RESTART_SCRIPT "$@" &
   fi
 }
 
-# https://towardsdatascience.com/proper-ways-to-pass-environment-variables-in-json-for-curl-post-f797d2698bf3
-generate_webhook_payload() {
-  local text="$@"
-  cat <<EOF
-{
-  "$WEBHOOK_JSON_KEY":"$text"
-}
-EOF
-}
+###############################################################################
+# Lifecycle
+###############################################################################
 
-generate_apprise_payload() {
-  local text="$@"
-  cat <<EOF
-{
-  "title":"Autoheal",
-  "body":"$text"
-}
-EOF
-}
+CHILD_PID=""
 
 # SIGTERM-handler
-term_handler() {
-  exit 143  # 128 + 15 -- SIGTERM
+#
+# The old handler ran `kill $$` before exiting, which re-delivered SIGTERM to the
+# shell from inside its own trap and showed up as a segfault in the host's
+# syslog. Killing the job we are parked on is enough: the handler's own `exit`
+# ends the shell.
+signal_handler() {
+  local code="$1"
+
+  if [ -n "$CHILD_PID" ]
+  then
+    kill "$CHILD_PID" 2>/dev/null || true
+  fi
+
+  exit "$code"
 }
 
-# shellcheck disable=2039
-trap 'kill $$; term_handler' SIGTERM
+trap 'signal_handler 143' TERM  # 128 + 15
+trap 'signal_handler 130' INT   # 128 + 2
+
+# Sleeping in the background and waiting keeps the shell responsive to signals:
+# a foreground `sleep` would delay shutdown by up to AUTOHEAL_INTERVAL seconds.
+interruptible_sleep() {
+  sleep "$1" &
+  CHILD_PID=$!
+  wait "$CHILD_PID" || true
+  CHILD_PID=""
+}
+
+write_heartbeat() {
+  date +%s > "$HEARTBEAT_FILE" 2>/dev/null || true
+}
+
+# The container healthcheck: `pgrep autoheal` only proved the process existed,
+# so a loop wedged on an unreachable Docker API still reported healthy.
+run_healthcheck() {
+  local beat
+  local age
+  local max
+
+  if [ ! -r "$HEARTBEAT_FILE" ]
+  then
+    echo "autoheal heartbeat ${HEARTBEAT_FILE} is missing" >&2
+    return 1
+  fi
+
+  beat=$(cat "$HEARTBEAT_FILE" 2>/dev/null || echo "")
+  case "$beat" in
+    ''|*[!0-9]*) echo "autoheal heartbeat ${HEARTBEAT_FILE} is not readable" >&2
+                 return 1
+                 ;;
+  esac
+
+  age=$(( $(date +%s) - beat ))
+  max=$(( AUTOHEAL_INTERVAL * 3 + CURL_TIMEOUT * 2 ))
+
+  if [ "$age" -gt "$max" ]
+  then
+    echo "autoheal has not completed a sweep for ${age}s (max ${max}s)" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+###############################################################################
+# Sweeps
+###############################################################################
+
+# jq program shared by both sweeps. Emits four lines per container.
+#
+# The opt-out comparison is case-insensitive: `autoheal=false` is what the
+# README and every compose example use, but the check only ever excluded the
+# capitalised "False", so the documented opt-out silently did nothing.
+container_fields() {
+  local status_field="$1"
+
+  cat <<JQ
+.[]
+| select((((.Labels["autoheal"] // "") | ascii_downcase) != "false")
+     and (((.Labels[\$label]     // "") | ascii_downcase) != "false"))
+| .Id, (.Names[0] // "null"), ${status_field}, (.Labels["autoheal.stop.timeout"] // \$default)
+JQ
+}
+
+# read_containers JSON JQ_PROGRAM -> four lines per container
+read_containers() {
+  printf '%s' "$1" | jq -r \
+    --arg label "$AUTOHEAL_CONTAINER_LABEL" \
+    --arg default "$AUTOHEAL_DEFAULT_STOP_TIMEOUT" \
+    "$2"
+}
+
+# fetch_containers DESCRIPTION FETCHER -> JSON array, or empty on failure
+fetch_containers() {
+  local description="$1"
+  local fetcher="$2"
+  local body
+
+  # A transient API error used to take the whole daemon down through `set -e`;
+  # now it is logged and the next sweep tries again.
+  if ! body=$("$fetcher" 2>&1)
+  then
+    log_err "Failed to query the Docker API for ${description}: ${body}"
+    return 1
+  fi
+
+  if ! printf '%s' "$body" | jq -e 'type == "array"' >/dev/null 2>&1
+  then
+    log_err "Unexpected Docker API response while looking for ${description}: $(printf '%s' "$body" | head -c 200)"
+    return 1
+  fi
+
+  printf '%s' "$body"
+}
+
+heal_unhealthy_containers() {
+  local containers
+
+  containers=$(fetch_containers "unhealthy containers" get_unhealthy_container_info) || return 0
+
+  if ! read_containers "$containers" "$(container_fields .State)" | \
+    while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
+  do
+    CONTAINER_SHORT_ID=${CONTAINER_ID:0:12}
+
+    # The label goes straight into the restart query string, so a typo such as
+    # `autoheal.stop.timeout=20s` must not travel to the Docker API.
+    TIMEOUT=$(sanitize_int "autoheal.stop.timeout on ${CONTAINER_SHORT_ID}" "$TIMEOUT" "$AUTOHEAL_DEFAULT_STOP_TIMEOUT" 0)
+
+    if [ "$CONTAINER_NAME" = "null" ]
+    then
+      log_err "Container name of (${CONTAINER_SHORT_ID}) is null, which implies container does not exist - don't restart"
+    elif [ "$CONTAINER_STATE" = "restarting" ]
+    then
+      log "Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be restarting - don't restart"
+    else
+      log "Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be unhealthy - Restarting container now with ${TIMEOUT}s timeout"
+
+      HEALTH_SUFFIX=""
+      if is_true "$AUTOHEAL_INCLUDE_HEALTH_OUTPUT"
+      then
+        HEALTH_OUTPUT=$(last_health_output "$CONTAINER_ID")
+        if [ -n "$HEALTH_OUTPUT" ]
+        then
+          HEALTH_SUFFIX=" The last healthcheck output was: ${HEALTH_OUTPUT}"
+        fi
+      fi
+
+      if ! restart_container "$CONTAINER_ID" "$TIMEOUT"
+      then
+        log_err "Restarting container $CONTAINER_SHORT_ID failed"
+        notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Failed to restart the container!${HEALTH_SUFFIX}"
+      else
+        notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Successfully restarted the container!${HEALTH_SUFFIX}"
+      fi
+      notify_post_restart_script "$CONTAINER_NAME" "$CONTAINER_SHORT_ID" "$CONTAINER_STATE" "$TIMEOUT"
+    fi
+  done
+  then
+    log_err "Failed to process the list of unhealthy containers"
+  fi
+}
+
+start_exited_containers() {
+  local containers
+
+  containers=$(fetch_containers "exited containers" get_exited_container_info) || return 0
+
+  if ! read_containers "$containers" "$(container_fields .State)" | \
+    while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
+  do
+    CONTAINER_SHORT_ID=${CONTAINER_ID:0:12}
+
+    if [ "$CONTAINER_NAME" = "null" ]
+    then
+      log_err "Container name of (${CONTAINER_SHORT_ID}) is null, which implies container does not exist - don't start"
+    else
+      log "Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be exited - Starting container now"
+      if ! start_container "$CONTAINER_ID"
+      then
+        log_err "Starting container $CONTAINER_SHORT_ID failed"
+        notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be exited. Failed to start the container!"
+      else
+        notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be exited. Successfully started the container!"
+      fi
+    fi
+  done
+  then
+    log_err "Failed to process the list of exited containers"
+  fi
+}
+
+###############################################################################
+# Entrypoint
+###############################################################################
+
+if [ "$1" = "healthcheck" ]
+then
+  if run_healthcheck
+  then
+    exit 0
+  fi
+  exit 1
+fi
 
 if [ "$1" = "autoheal" ]
 then
-  if [ -n "$UNIX_SOCK" ] && ! [ -S "$DOCKER_SOCK" ]
+  echo "AUTOHEAL_CONTAINER_LABEL=${AUTOHEAL_CONTAINER_LABEL}"
+  echo "AUTOHEAL_START_PERIOD=${AUTOHEAL_START_PERIOD}"
+  echo "AUTOHEAL_INTERVAL=${AUTOHEAL_INTERVAL}"
+  echo "AUTOHEAL_DEFAULT_STOP_TIMEOUT=${AUTOHEAL_DEFAULT_STOP_TIMEOUT}"
+  echo "AUTOHEAL_ONLY_MONITOR_RUNNING=${AUTOHEAL_ONLY_MONITOR_RUNNING}"
+  echo "AUTOHEAL_START_EXITED_CONTAINERS=${AUTOHEAL_START_EXITED_CONTAINERS}"
+  echo "AUTOHEAL_INCLUDE_HEALTH_OUTPUT=${AUTOHEAL_INCLUDE_HEALTH_OUTPUT}"
+
+  if [ -n "$UNIX_SOCK" ]
   then
-    echo "unix socket is currently not available" >&2
-    exit 1
+    if [ ! -S "$DOCKER_SOCK" ]
+    then
+      echo "Docker socket ${DOCKER_SOCK} is not available: mount it with -v ${DOCKER_SOCK}:${DOCKER_SOCK}" >&2
+      exit 1
+    fi
+    # Without this the container used to sit in a silent no-op loop: every API
+    # call failed on permissions and nothing was ever restarted or reported.
+    if [ ! -w "$DOCKER_SOCK" ]
+    then
+      echo "Docker socket ${DOCKER_SOCK} is not writable by uid $(id -u): grant access to the socket's group or run the container as a user that has it" >&2
+      exit 1
+    fi
   fi
-  # Delayed startup
+
+  if ! PING_ERROR=$(docker_curl "${HTTP_ENDPOINT}/_ping" 2>&1)
+  then
+    log_err "Unable to reach the Docker API at ${DOCKER_SOCK}: ${PING_ERROR} - will keep retrying every ${AUTOHEAL_INTERVAL}s"
+  fi
+
+  write_heartbeat
+
+  # Delayed startup, in interval-sized steps so the heartbeat stays fresh.
   if [ "$AUTOHEAL_START_PERIOD" -gt 0 ]
   then
-  echo "Monitoring containers for unhealthy status in $AUTOHEAL_START_PERIOD second(s)"
-    sleep "$AUTOHEAL_START_PERIOD" &
-    wait $!
+    log "Monitoring containers for unhealthy status in $AUTOHEAL_START_PERIOD second(s)"
+
+    REMAINING=$AUTOHEAL_START_PERIOD
+    while [ "$REMAINING" -gt 0 ]
+    do
+      CHUNK=$AUTOHEAL_INTERVAL
+      if [ "$CHUNK" -gt "$REMAINING" ]
+      then
+        CHUNK=$REMAINING
+      fi
+      interruptible_sleep "$CHUNK"
+      REMAINING=$((REMAINING - CHUNK))
+      write_heartbeat
+    done
+  fi
+
+  if is_true "$AUTOHEAL_NOTIFY_ON_START"
+  then
+    notify_webhook "Autoheal started and is monitoring containers matching ${AUTOHEAL_CONTAINER_LABEL} every ${AUTOHEAL_INTERVAL}s."
   fi
 
   while true
   do
-    STOP_TIMEOUT=".Labels[\"autoheal.stop.timeout\"] // $AUTOHEAL_DEFAULT_STOP_TIMEOUT"
-    get_container_info | \
-      jq -r ".[] | select(.Labels[\"autoheal\"] != \"False\") | foreach . as \$CONTAINER([];[]; \$CONTAINER | .Id, .Names[0], .State, ${STOP_TIMEOUT})" | \
-      while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
-    do
-      # shellcheck disable=2039
-      CONTAINER_SHORT_ID=${CONTAINER_ID:0:12}
-      DATE=$(date +%d-%m-%Y" "%H:%M:%S)
+    heal_unhealthy_containers
 
-      if [ "$CONTAINER_NAME" = "null" ]
-      then
-        echo "$DATE Container name of (${CONTAINER_SHORT_ID}) is null, which implies container does not exist - don't restart" >&2
-      elif [ "$CONTAINER_STATE" = "restarting" ]
-      then
-        echo "$DATE Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be restarting - don't restart"
-      else
-        echo "$DATE Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be unhealthy - Restarting container now with ${TIMEOUT}s timeout"
-        if ! restart_container "$CONTAINER_ID" "$TIMEOUT"
-        then
-          echo "$DATE Restarting container $CONTAINER_SHORT_ID failed" >&2
-          notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Failed to restart the container!"
-        else
-          notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Successfully restarted the container!"
-        fi
-        notify_post_restart_script "$CONTAINER_NAME" "$CONTAINER_SHORT_ID" "$CONTAINER_STATE" "$TIMEOUT"
-      fi
-    done
-    sleep "$AUTOHEAL_INTERVAL" &
-    wait $!
+    if is_true "$AUTOHEAL_START_EXITED_CONTAINERS"
+    then
+      start_exited_containers
+    fi
+
+    write_heartbeat
+    interruptible_sleep "$AUTOHEAL_INTERVAL"
   done
 
 else

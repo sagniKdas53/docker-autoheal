@@ -64,7 +64,11 @@ The certificates and keys need these names and resides under /certs inside the c
 > See https://docs.docker.com/engine/security/https/ for how to configure TCP with mTLS
 
 ### Change Timezone
-If you need the timezone to match the local machine, you can map the `/etc/localtime` into the container.
+The image ships `tzdata`, so log timestamps and notification bodies follow `TZ`:
+```bash
+docker run ... -e TZ=Europe/Berlin
+```
+Bind-mounting the host's zone also still works:
 ```bash
 docker run ... -v /etc/localtime:/etc/localtime:ro
 ```
@@ -103,20 +107,76 @@ services:
 ```
 
 #### Optional Container Labels
-|`autoheal.stop.timeout=20`            |Per containers override for stop timeout seconds during restart|
+|Label                                 |Description|
 | --- | --- |
+|`autoheal.stop.timeout=20`            |Per container override for the stop timeout in seconds during restart. Non-numeric values are rejected with a warning and the default is used.|
+|`autoheal=false`                      |Opt a container out of healing even when it matches the watch filter. The comparison is case-insensitive, so `false`, `False` and `FALSE` all work.|
 
 ## Environment Defaults
-|Variable                              |Description|
+|Variable                                |Description|
 | --- | --- |
-|`AUTOHEAL_CONTAINER_LABEL=autoheal`   |set to existing label name that has the value `true`|
-|`AUTOHEAL_INTERVAL=5`                 |check every 5 seconds|
-|`AUTOHEAL_START_PERIOD=0`             |wait 0 seconds before first health check|
-|`AUTOHEAL_DEFAULT_STOP_TIMEOUT=10`    |Docker waits max 10 seconds (the Docker default) for a container to stop before killing during restarts (container overridable via label, see below)|
-|`AUTOHEAL_ONLY_MONITOR_RUNNING=false` |All containers monitored by default. Set this to true to only monitor running containers. This will result in Paused contaners being ignored.|
-|`DOCKER_SOCK=/var/run/docker.sock`    |Unix socket for curl requests to Docker API|
-|`CURL_TIMEOUT=30`                     |--max-time seconds for curl requests to the Docker API and to webhooks. Must be a positive integer; `0` and other invalid values fall back to 30, since curl treats `--max-time 0` as no timeout at all|
-|`WEBHOOK_URL=""`                      |post message to the webhook if a container was restarted (or restart failed)|
+|`AUTOHEAL_CONTAINER_LABEL=autoheal`     |set to existing label name that has the value `true`, or `all` to watch every container|
+|`AUTOHEAL_INTERVAL=5`                   |check every 5 seconds|
+|`AUTOHEAL_START_PERIOD=0`               |wait 0 seconds before first health check|
+|`AUTOHEAL_DEFAULT_STOP_TIMEOUT=10`      |Docker waits max 10 seconds (the Docker default) for a container to stop before killing during restarts (container overridable via label, see above)|
+|`AUTOHEAL_ONLY_MONITOR_RUNNING=false`   |All containers monitored by default. Set this to true to only monitor running containers. This will result in Paused containers being ignored.|
+|`AUTOHEAL_START_EXITED_CONTAINERS=false`|Also start containers that carry the watch label and are in the `exited` state. Requires a real `AUTOHEAL_CONTAINER_LABEL`; it is refused (with a log line) when the label is `all`, because that would start every stopped container on the host.|
+|`AUTOHEAL_NOTIFY_ON_START=false`        |Send one notification when autoheal finishes starting up. Useful for confirming that `WEBHOOK_URL`/`APPRISE_URL` are wired up correctly without having to break a container first.|
+|`AUTOHEAL_INCLUDE_HEALTH_OUTPUT=false`  |Append the container's last healthcheck output to the notification, so the alert says *why* the container was unhealthy. Read before the restart, since restarting clears the health log.|
+|`AUTOHEAL_HEALTH_OUTPUT_LIMIT=500`      |Maximum number of characters of healthcheck output to include|
+|`DOCKER_SOCK=/var/run/docker.sock`      |Unix socket for curl requests to Docker API, or a `tcp://host:port` / `tcps://host:port` endpoint|
+|`CURL_TIMEOUT=30`                       |--max-time seconds for curl requests to the Docker API and to webhooks. Must be a positive integer; `0` and other invalid values fall back to 30, since curl treats `--max-time 0` as no timeout at all|
+|`WEBHOOK_URL=""`                        |post message to the webhook if a container was restarted (or restart failed)|
+|`WEBHOOK_JSON_KEY="content"`            |JSON key the message is sent under, e.g. `content` for Discord, `text` for Slack and Mattermost|
+|`APPRISE_URL=""`                        |post the same message to an [Apprise](https://github.com/caronc/apprise-api) notify endpoint as `{"title": ..., "body": ...}`|
+|`POST_RESTART_SCRIPT=""`                |command to run after each restart attempt (see the warning below)|
+|`TZ=""`                                 |timezone for log timestamps, e.g. `Europe/Berlin`|
+
+Every numeric setting is validated at startup. An unparsable value is reported on
+stderr and replaced with its default rather than killing the container on the
+first `sleep`.
+
+## Notifications
+
+`WEBHOOK_URL` posts `{"<WEBHOOK_JSON_KEY>": "<message>"}`, which covers Discord,
+Slack, Mattermost, Home Assistant and anything else that accepts a single-key
+JSON body. Payloads are built with `jq`, so container names and healthcheck
+output containing quotes, backslashes or newlines stay valid JSON.
+
+For ntfy, Gotify, Pushover, Telegram, email and roughly a hundred other
+services, point `APPRISE_URL` at an [Apprise API](https://github.com/caronc/apprise-api)
+instance rather than adding a provider-specific integration here:
+
+```yaml
+    environment:
+      APPRISE_URL: http://apprise:8000/notify/autoheal
+```
+
+Delivery happens in the background so a slow or unreachable endpoint never stalls
+the healing loop, and each attempt logs its outcome (transport error or non-2xx
+status) instead of failing silently.
+
+Set `AUTOHEAL_NOTIFY_ON_START=true` to get a notification at startup if you want
+to verify the configuration end to end.
+
+### `POST_RESTART_SCRIPT`
+
+> **Warning:** `POST_RESTART_SCRIPT` is executed by the shell with the container
+> name, short id, state and timeout as arguments. Anyone who can set environment
+> variables on this container can therefore run arbitrary commands inside it,
+> and this container has access to the Docker socket. Leave it empty unless you
+> control the deployment, and keep the script itself inside the image.
+
+## Container health
+
+The image's own `HEALTHCHECK` reads a heartbeat that the daemon stamps after
+every completed sweep. A loop that is wedged on an unreachable Docker API is
+reported as unhealthy, where the previous `pgrep` check only proved the process
+still existed.
+
+Startup failures are explicit too: a missing Docker socket, a socket the
+container cannot write to, or an unreachable API each produce a named error
+rather than a silent no-op loop.
 
 ## Testing (building locally)
 ```bash
@@ -126,4 +186,12 @@ docker run -d \
     -e AUTOHEAL_CONTAINER_LABEL=all \
     -v /var/run/docker.sock:/var/run/docker.sock \
     autoheal
+```
+
+The integration suite in [`tests/`](tests/) brings up a compose stack of healthy,
+unhealthy and opted-out containers plus a webhook sink, and asserts what was and
+was not restarted:
+
+```bash
+cd tests && ./tests.sh
 ```

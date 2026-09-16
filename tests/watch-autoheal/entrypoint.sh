@@ -9,6 +9,7 @@ expected_restart_services=(
 unexpected_restart_services=(
   "shouldnt-restart-healthy"
   "shouldnt-restart-no-label"
+  "shouldnt-restart-opted-out"
 )
 
 expected_webhook_targets=(
@@ -103,6 +104,38 @@ webhook_request_count() {
   grep -c "found to be unhealthy" <<<"$logs" || true
 }
 
+webhook_reports_startup() {
+  local logs="$1"
+
+  # AUTOHEAL_NOTIFY_ON_START is enabled for the stack, so the sink must have
+  # seen a startup notification before any restart notification.
+  [[ "$logs" == *"Autoheal started and is monitoring containers"* ]]
+}
+
+# The image's HEALTHCHECK reads a heartbeat the daemon stamps after every sweep,
+# so this asserts the loop is actually running, not merely that the process
+# exists.
+autoheal_reports_healthy() {
+  local ids
+  local status
+
+  if ! ids=$(docker ps -q \
+    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+    --filter "label=com.docker.compose.service=autoheal"); then
+    return 1
+  fi
+
+  if [[ -z "$ids" ]]; then
+    return 1
+  fi
+
+  status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    "${ids%%$'\n'*}" 2>/dev/null) || return 1
+
+  echo "autoheal container health: $status"
+  [[ "$status" == "healthy" ]]
+}
+
 webhook_reports_successful_restart() {
   local target="$1"
   local logs="$2"
@@ -135,11 +168,25 @@ print_webhook_logs() {
   webhook_logs || true
 }
 
-deadline=$((SECONDS + 60))
+print_autoheal_logs() {
+  local ids
+
+  ids=$(docker ps -aq \
+    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+    --filter "label=com.docker.compose.service=autoheal") || return 0
+
+  echo "autoheal logs:"
+  docker logs "${ids%%$'\n'*}" 2>&1 || true
+}
+
+# The image's HEALTHCHECK has a 30s interval, so the first probe lands well after
+# the restarts do; the window has to outlast it.
+deadline=$((SECONDS + 150))
 
 while (( SECONDS < deadline )); do
   expected_restarts_met=true
   expected_webhooks_met=true
+  autoheal_healthy=true
 
   restart_events=$(restart_events_or_die)
   sink_logs=$(webhook_logs_or_die)
@@ -162,6 +209,14 @@ while (( SECONDS < deadline )); do
     fi
   done
 
+  if ! webhook_reports_startup "$sink_logs"; then
+    expected_webhooks_met=false
+  fi
+
+  if ! autoheal_reports_healthy; then
+    autoheal_healthy=false
+  fi
+
   for service in "${unexpected_restart_services[@]}"; do
     count=$(restart_event_count_for_service "$service" "$restart_events")
     echo "$service restart events: $count"
@@ -172,15 +227,16 @@ while (( SECONDS < deadline )); do
     fi
   done
 
-  if [[ "$expected_restarts_met" == true && "$expected_webhooks_met" == true ]]; then
-    echo "OK: Expected unhealthy containers were restarted and webhook notifications were delivered"
+  if [[ "$expected_restarts_met" == true && "$expected_webhooks_met" == true && "$autoheal_healthy" == true ]]; then
+    echo "OK: Expected unhealthy containers were restarted, opted-out and healthy containers were left alone, webhook notifications were delivered, and autoheal reports healthy"
     exit 0
   fi
 
   sleep 2
 done
 
-echo "ERR: Timed out waiting for unhealthy containers to restart or emit webhook notifications" >&2
+echo "ERR: Timed out waiting for unhealthy containers to restart, for webhook notifications, or for autoheal to report healthy" >&2
 print_restart_event_counts
 print_webhook_logs
+print_autoheal_logs
 exit 1

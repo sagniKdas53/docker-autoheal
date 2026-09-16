@@ -22,6 +22,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # shellcheck ships on the GitHub-hosted runners.
+      - name: ShellCheck
+        run: shellcheck docker-entrypoint tests/tests.sh tests/watch-autoheal/entrypoint.sh
+
+      - name: Hadolint
+        run: |
+          docker run --rm -i \
+            -v "${{ github.workspace }}/.hadolint.yaml:/config.yaml:ro" \
+            hadolint/hadolint:latest-alpine \
+            hadolint --config /config.yaml - < Dockerfile
+
   test:
     runs-on: ubuntu-latest
     steps:

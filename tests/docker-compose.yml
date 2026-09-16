@@ -46,6 +46,24 @@ services:
       start_period: 1s
     command: tail -f /dev/null
 
+  shouldnt-restart-opted-out:
+    # this container should not be restarted: it carries the watch label but
+    # opts out with the documented lower-case `autoheal=false`, which the
+    # exclusion used to miss because it only compared against "False"
+    image: alpine
+    network_mode: none
+    restart: "no"
+    labels:
+      - "$AUTOHEAL_CONTAINER_LABEL=true"
+      - "autoheal=false"
+    healthcheck:
+      test: exit 1
+      interval: 1s
+      timeout: 1s
+      retries: 1
+      start_period: 1s
+    command: tail -f /dev/null
+
   shouldnt-restart-no-label:
     # this container should not be restarted because it is unhealthy but missing the autoheal label
     image: alpine
@@ -66,6 +84,7 @@ services:
     environment:
       AUTOHEAL_CONTAINER_LABEL: "${AUTOHEAL_CONTAINER_LABEL:-all}"
       AUTOHEAL_INTERVAL: "2"
+      AUTOHEAL_NOTIFY_ON_START: "true"
       WEBHOOK_URL: "http://webhook-sink:8080/notify"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
