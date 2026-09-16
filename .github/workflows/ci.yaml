@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/**'
+      - '.hadolint.yaml'
       - 'Dockerfile'
       - 'docker-entrypoint'
       - 'tests/**'
@@ -12,6 +13,7 @@ on:
       - main
     paths:
       - '.github/workflows/**'
+      - '.hadolint.yaml'
       - 'Dockerfile'
       - 'docker-entrypoint'
       - 'tests/**'
@@ -22,6 +24,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # shellcheck ships on the GitHub-hosted runners.
+      - name: ShellCheck
+        run: shellcheck docker-entrypoint tests/tests.sh tests/watch-autoheal/entrypoint.sh
+
+      # A pinned binary rather than `docker run hadolint/hadolint`: the image's
+      # entrypoint differs between the debian and alpine tags, so the invocation
+      # silently depends on which tag is in use. This also keeps CI on the same
+      # version a contributor runs locally.
+      - name: Hadolint
+        env:
+          HADOLINT_VERSION: v2.15.1
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/hadolint" \
+            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          chmod +x "${RUNNER_TEMP}/hadolint"
+          "${RUNNER_TEMP}/hadolint" --config .hadolint.yaml Dockerfile
+
   test:
     runs-on: ubuntu-latest
     steps:

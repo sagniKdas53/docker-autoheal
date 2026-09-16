@@ -1,0 +1,5 @@
+ignored:
+  # Alpine's package index only carries the current build of each package, so
+  # pinning curl/jq/tzdata breaks the image the moment Alpine ships a patch
+  # release. The base image tag is pinned instead (ALPINE_VERSION).
+  - DL3018
