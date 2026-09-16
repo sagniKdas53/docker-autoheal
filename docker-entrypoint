@@ -308,8 +308,12 @@ run_healthcheck() {
                  ;;
   esac
 
+  # The daemon stamps a heartbeat before each API query and before each
+  # container it processes, so the widest legitimate gap is one container's
+  # inspect plus its restart. Budget three curl timeouts for headroom: a sweep
+  # over many slow-to-stop containers is progress, not a wedge.
   age=$(( $(date +%s) - beat ))
-  max=$(( AUTOHEAL_INTERVAL * 3 + CURL_TIMEOUT * 2 ))
+  max=$(( AUTOHEAL_INTERVAL * 3 + CURL_TIMEOUT * 3 ))
 
   if [ "$age" -gt "$max" ]
   then
@@ -354,6 +358,8 @@ fetch_containers() {
   local fetcher="$2"
   local body
 
+  write_heartbeat
+
   # A transient API error used to take the whole daemon down through `set -e`;
   # now it is logged and the next sweep tries again.
   if ! body=$("$fetcher" 2>&1)
@@ -379,6 +385,11 @@ heal_unhealthy_containers() {
   if ! read_containers "$containers" "$(container_fields .State)" | \
     while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
   do
+    # Per container, not per sweep: restarting a dozen containers that each take
+    # their full stop timeout is a healthy daemon doing its job, and it must not
+    # trip the container healthcheck.
+    write_heartbeat
+
     CONTAINER_SHORT_ID=${CONTAINER_ID:0:12}
 
     # The label goes straight into the restart query string, so a typo such as
@@ -427,6 +438,8 @@ start_exited_containers() {
   if ! read_containers "$containers" "$(container_fields .State)" | \
     while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
   do
+    write_heartbeat
+
     CONTAINER_SHORT_ID=${CONTAINER_ID:0:12}
 
     if [ "$CONTAINER_NAME" = "null" ]

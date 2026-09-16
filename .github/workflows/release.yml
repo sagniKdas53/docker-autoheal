@@ -22,12 +22,18 @@ jobs:
       - name: ShellCheck
         run: shellcheck docker-entrypoint tests/tests.sh tests/watch-autoheal/entrypoint.sh
 
+      # A pinned binary rather than `docker run hadolint/hadolint`: the image's
+      # entrypoint differs between the debian and alpine tags, so the invocation
+      # silently depends on which tag is in use. This also keeps CI on the same
+      # version a contributor runs locally.
       - name: Hadolint
+        env:
+          HADOLINT_VERSION: v2.15.1
         run: |
-          docker run --rm -i \
-            -v "${{ github.workspace }}/.hadolint.yaml:/config.yaml:ro" \
-            hadolint/hadolint:latest-alpine \
-            hadolint --config /config.yaml - < Dockerfile
+          curl -fsSL -o "${RUNNER_TEMP}/hadolint" \
+            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          chmod +x "${RUNNER_TEMP}/hadolint"
+          "${RUNNER_TEMP}/hadolint" --config .hadolint.yaml Dockerfile
 
   test:
     runs-on: ubuntu-latest
