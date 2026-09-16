@@ -205,7 +205,9 @@ notify_json_endpoint() {
       -d "$payload" \
       "$url" 2>&1)
     then
-      log_err "Notification to ${url} failed: ${result}"
+      # curl's stderr and the -w status code both land in $result; collapse them
+      # so one failed notification is one greppable log line.
+      log_err "Notification to ${url} failed: $(printf '%s' "$result" | tr '\n' ' ')"
     elif [ "$result" -lt 200 ] || [ "$result" -ge 300 ]
     then
       log_err "Notification to ${url} returned HTTP ${result}"

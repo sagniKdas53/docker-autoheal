@@ -81,6 +81,12 @@ services:
     build:
       context: ../
     restart: unless-stopped
+    # AUTOHEAL_NOTIFY_ON_START fires within a second of startup, so the sink has
+    # to be accepting connections before autoheal comes up or that notification
+    # is lost to a connection refusal.
+    depends_on:
+      webhook-sink:
+        condition: service_healthy
     environment:
       AUTOHEAL_CONTAINER_LABEL: "${AUTOHEAL_CONTAINER_LABEL:-all}"
       AUTOHEAL_INTERVAL: "2"
